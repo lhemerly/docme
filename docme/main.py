@@ -1,97 +1,113 @@
 import os
-import sys
 import tempfile
+import sys
+import ast
 from git import Repo
 
-
 def clone_repo(git_url, clone_dir):
-    """
-    Clone a GitHub repository to a specified directory.
-
-    Args:
-        git_url (str): The URL of the GitHub repository.
-        clone_dir (str): The directory to clone the repository into.
-    """
     print(f"Cloning {git_url} into {clone_dir}...")
     Repo.clone_from(git_url, clone_dir)
     print("Repository cloned successfully.")
 
-
-def parse_rst(file_path):
+def extract_docstrings(file_path):
     """
-    Read an .rst file and return its content as is.
-
-    Args:
-        file_path (str): The path to the .rst file.
-
-    Returns:
-        str: The content of the .rst file.
+    Extract docstrings from a Python file.
     """
     with open(file_path, "r", encoding="utf-8") as f:
-        return f.read()
+        tree = ast.parse(f.read(), filename=file_path)
 
-
-def parse_md(file_path):
-    """
-    Read a Markdown file and return its content as is.
-
-    Args:
-        file_path (str): The path to the Markdown file.
-
-    Returns:
-        str: The content of the Markdown file.
-    """
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read()
-
+    docstrings = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Module)):
+            docstring = ast.get_docstring(node)
+            if docstring:
+                name = node.name if hasattr(node, "name") else "<module>"
+                docstrings.append((file_path, name, docstring))
+    return docstrings
 
 def traverse_and_parse(repo_dir, output_file):
     """
-    Traverse the repository and parse all .rst and .md files.
-
-    Args:
-        repo_dir (str): The directory of the cloned repository.
-        output_file (str): The file to write the combined content to.
+    Traverse the docs repo and parse all .md files
+    (excluding Sphinx placeholder .md files that contain ```{toctree}).
     """
     with open(output_file, "w", encoding="utf-8") as out_f:
         for root, _, files in os.walk(repo_dir):
             for file in files:
                 file_path = os.path.join(root, file)
                 relative_path = os.path.relpath(file_path, repo_dir)
-                if file.endswith(".rst"):
-                    print(f"Reading {file_path}...")
-                    out_f.write(f"File: {relative_path}\n")
-                    out_f.write(parse_rst(file_path))
-                    out_f.write("\n\n")
-                elif file.endswith(".md"):
-                    print(f"Reading {file_path}...")
-                    out_f.write(f"File: {relative_path}\n")
-                    out_f.write(parse_md(file_path))
-                    out_f.write("\n\n")
-    print(f"Output written to {output_file}")
 
+                # .md
+                if file.endswith(".md"):
+                    # Check if it has a Sphinx toctree directive
+                    with open(file_path, "r", encoding="utf-8") as check_f:
+                        content = check_f.read()
+                        if "```{toctree}" in content:
+                            # Skip these "index" or "toctree" placeholders
+                            continue
+
+                    print(f"Reading {file_path}...")
+                    out_f.write(f"File: {relative_path}\n")
+                    out_f.write(content)
+                    out_f.write("\n\n")
+
+def parse_docstrings(library_repo_dir, output_file):
+    """
+    Parse all Python files in the library repo and extract docstrings.
+    """
+    with open(output_file, "w", encoding="utf-8") as out_f:
+        for root, _, files in os.walk(library_repo_dir):
+            for file in files:
+                if file.endswith(".py"):
+                    file_path = os.path.join(root, file)
+                    print(f"Extracting docstrings from {file_path}...")
+                    docstrings = extract_docstrings(file_path)
+                    for file_path, name, docstring in docstrings:
+                        out_f.write(f"File: {file_path}\n")
+                        out_f.write(f"Function/Class: {name}\n")
+                        out_f.write(f"Docstring:\n{docstring}\n\n")
+
+    print(f"Docstrings extracted and saved to {output_file}")
 
 def main():
-    """
-    Main function to clone a GitHub repository and parse its documentation files.
-
-    Usage:
-        python script.py <github_repo_url>
-    """
-    if len(sys.argv) != 2:
-        print("Usage: python script.py <github_repo_url>")
+    if len(sys.argv) != 3:
+        print("Usage: python script.py <github_docs_url> <github_library_url>")
         sys.exit(1)
 
-    git_url = sys.argv[1]
+    docs_git_url = sys.argv[1]
+    library_git_url = sys.argv[2]
+
     with tempfile.TemporaryDirectory() as temp_dir:
+        docs_dir = os.path.join(temp_dir, "docs_repo")
+        lib_dir = os.path.join(temp_dir, "library_repo")
+
         try:
-            clone_repo(git_url, temp_dir)
-            output_file = "output.txt"
-            traverse_and_parse(temp_dir, output_file)
-            print(f"Combined documentation saved to {output_file}")
+            # 1) Clone both repos
+            clone_repo(docs_git_url, docs_dir)
+            clone_repo(library_git_url, lib_dir)
+
+            # 2) Parse the manual docs (md)
+            manual_docs_output_file = os.path.join(temp_dir, "manual_docs.txt")
+            traverse_and_parse(docs_dir, manual_docs_output_file)
+
+            # 3) Parse the docstrings from the library code
+            docstrings_output_file = os.path.join(temp_dir, "docstrings.txt")
+            parse_docstrings(lib_dir, docstrings_output_file)
+
+            # 4) Combine them into a single final file
+            final_output_file = "combined_output.md"  # or .txt, your choice
+            with open(final_output_file, "w", encoding="utf-8") as out_f:
+                out_f.write("# Manual `.md` Documentation\n\n")
+                with open(manual_docs_output_file, "r", encoding="utf-8") as f:
+                    out_f.write(f.read())
+
+                out_f.write("# Auto-Extracted Docstrings\n\n")
+                with open(docstrings_output_file, "r", encoding="utf-8") as f:
+                    out_f.write(f.read())
+
+            print(f"Final merged file with everything: {final_output_file}")
+
         except Exception as e:
             print(f"An error occurred: {e}")
-
 
 if __name__ == "__main__":
     main()
